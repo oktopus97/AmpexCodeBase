@@ -23,5 +23,6 @@ stones (moon stones) to be used for the building of fiber composite materials.
 
 
 ##### internal
-for more info look at internal.md
+run `./start.sh` to start the gui
+`./start.sh wifi` mode will run it on wifi mode
 
