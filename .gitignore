@@ -1,5 +1,6 @@
 lib/
 conf/
+misc/
 *.pyc
 *.swp
 *.swo
