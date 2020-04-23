@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include "enums.h"
 #define NOSENSORS 4
 #define BUFFER_SIZE 64
 #define COMMAND_SUB_BUFFER BUFFER_SIZE-16 
@@ -8,20 +9,7 @@
 #define ESP8266 0
 #define ARDUINO 1
 
-enum i2cCommands:uint8_t{
-  _PING=1,
-  SETSTATUS,
-  GPIO_READ,
-  GPIO_WRITE
-};
-enum _status:uint8_t{
-  READY=1,
-  SENSORERR,
-  WAITING
-  //spinning usw.
-  
-};
- _status currentStatus = READY;
+_status currentStatus = INIT;
 
 void clear_buffer(uint8_t * buff, int len) {
   uint8_t *ptr = buff;
@@ -39,15 +27,9 @@ void send_i2c(uint8_t * buff, int len) {
   uint8_t * ptr = (uint8_t*)buff;
   for (ptr; (int)(ptr-buff) < len; ptr++) {
  
-    
     Wire.write(*ptr);
     delay(15);
   }
-  Serial.print("Sending ");
-  Serial.print(len);
-  Serial.print(" bytes");
-  Serial.println();
-  
   delay(500);
   clear_buffer(buff, len);
 };
@@ -57,6 +39,7 @@ int recv_i2c(uint8_t * buff) {
   while(!Wire.available()){
     delay(100);
   }
+  uint8_t r;
   while (Wire.available()) {
     *ptr = Wire.read();
     ptr++;
@@ -80,14 +63,14 @@ void requested() {
   }
 };
 
+int last_ping;
 void received(int howMany) {
-  Serial.print("Received ");
-  Serial.print(howMany);
-  Serial.print(" Bytes \n");
   recv_i2c(_Buffer+COMMAND_SUB_BUFFER);
   //all command responses should be on the last 16  bytes of the buffer
   switch (*(_Buffer+COMMAND_SUB_BUFFER)){
     case _PING:
+      digitalWrite(13, HIGH);
+      last_ping = millis();
       clear_buffer(_Buffer, howMany);
       *(_Buffer+COMMAND_SUB_BUFFER) =_PING;
       available_bytes++;
@@ -100,7 +83,6 @@ void received(int howMany) {
         break;
     }
     case GPIO_WRITE:
-      Serial.println("lolo");
       GPIOWrite((char)*(_Buffer+(COMMAND_SUB_BUFFER+1)), *(_Buffer + (COMMAND_SUB_BUFFER+2)), *(_Buffer +(COMMAND_SUB_BUFFER+3)));
       clear_buffer(_Buffer, howMany);
       *_Buffer = 1;      
@@ -108,11 +90,13 @@ void received(int howMany) {
 
     case SETSTATUS:
       currentStatus = (_status)*(_Buffer + COMMAND_SUB_BUFFER +1);
+      Serial.println(*(_Buffer + COMMAND_SUB_BUFFER +1));
       Serial.print("\nStatus is ");
       Serial.print(currentStatus);
       Serial.println();
       clear_buffer(_Buffer+COMMAND_SUB_BUFFER, howMany);
       *_Buffer = currentStatus;
+      Serial.println(*_Buffer);
       break;
     default:
       Serial.println("COMMAND NOT VALID");
@@ -136,8 +120,6 @@ void GPIOWrite(char mod, uint8_t pin, uint8_t val){
   if (mod == 'a') { 
     analogWrite(pin, val);
   }  else { 
-    Serial.println(pin);
-    Serial.println(val);
     digitalWrite(pin, val);  
   };
 }
@@ -146,10 +128,14 @@ void GPIOWrite(char mod, uint8_t pin, uint8_t val){
 //------------procedural ------------
 
 //hardware code -->
-int sensors[NOSENSORS] = {1, 3, 4,5};
+int sensors[NOSENSORS] = {1, 2, 3,4};
 float multipliers[NOSENSORS] = {1,2,3,4};
+
+
 float getReading(int sensor_index) {
-  //TODO
+  if (sensor_index == 0) {
+    return multipliers[sensor_index] * analogRead(A0);
+  }
   return multipliers[sensor_index];
 }
 void buffCurrentReadings(uint8_t * buff) {
@@ -171,6 +157,7 @@ void buffCurrentReadings(uint8_t * buff) {
 void setup() {
   Serial.begin(9600);
   pinMode(LED_BUILTIN,OUTPUT);
+  pinMode(A0, INPUT);
   Wire.begin(ARDUINO);
   Wire.onReceive(received);
   Wire.onRequest(requested);
@@ -179,5 +166,10 @@ void setup() {
 
 
 void loop() {
-  delay(100);
+  if (millis() - last_ping > 10000 && (int)currentStatus > INIT) {
+    currentStatus = INIT;
+    GPIOWrite('d', 13, 0);
+    last_ping = millis();
+  }
+  delay(1000);
 }
