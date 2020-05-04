@@ -1,5 +1,7 @@
 #include <Wire.h>
 #include "enums.h"
+#include "pyrometer.h"
+
 #define NOSENSORS 4
 #define BUFFER_SIZE 64
 #define COMMAND_SUB_BUFFER BUFFER_SIZE-16 
@@ -28,8 +30,10 @@ void send_i2c(uint8_t * buff, int len) {
   for (ptr; (int)(ptr-buff) < len; ptr++) {
  
     Wire.write(*ptr);
+    Serial.write(*ptr);
     delay(15);
   }
+  Serial.println();
   delay(500);
   clear_buffer(buff, len);
 };
@@ -58,6 +62,7 @@ void requested() {
     buffCurrentReadings((uint8_t*)_Buffer);
     send_i2c(_Buffer,  1 + sizeof(float) * NOSENSORS);
   } else {
+    Serial.println("req");
     send_i2c((uint8_t*)(_Buffer+COMMAND_SUB_BUFFER), available_bytes);
     available_bytes = 0;
   }
@@ -90,13 +95,11 @@ void received(int howMany) {
 
     case SETSTATUS:
       currentStatus = (_status)*(_Buffer + COMMAND_SUB_BUFFER +1);
-      Serial.println(*(_Buffer + COMMAND_SUB_BUFFER +1));
       Serial.print("\nStatus is ");
       Serial.print(currentStatus);
       Serial.println();
       clear_buffer(_Buffer+COMMAND_SUB_BUFFER, howMany);
       *_Buffer = currentStatus;
-      Serial.println(*_Buffer);
       break;
     default:
       Serial.println("COMMAND NOT VALID");
@@ -128,22 +131,35 @@ void GPIOWrite(char mod, uint8_t pin, uint8_t val){
 //------------procedural ------------
 
 //hardware code -->
-int sensors[NOSENSORS] = {1, 2, 3,4};
-float multipliers[NOSENSORS] = {1,2,3,4};
+Pyrometer pyro;
+// TODO Motor code
+//Motor motor;
 
+//sensor indexes are
+//  0 -> Pyrometer
+//  ...
+bool fiber_in_cage = false;
 
+void procSpin() {
+  //spin cycle
+  return;
+}
+void procStop() {
+  //stop cycle
+  return;
+}
 float getReading(int sensor_index) {
   if (sensor_index == 0) {
-    return multipliers[sensor_index] * analogRead(A0);
+    return pyro.getReading();
   }
-  return multipliers[sensor_index];
+  return 100.0;
 }
 void buffCurrentReadings(uint8_t * buff) {
   float reading;
   uint8_t *ptr = buff;
   *ptr = currentStatus;
   ptr++;
-  for (int i; i< NOSENSORS; i ++) {
+  for (int i=0; i< NOSENSORS; i ++) {
      reading = getReading(i);
      memcpy(ptr, (void*)&reading, sizeof(reading));
      ptr += sizeof(reading);
@@ -161,6 +177,7 @@ void setup() {
   Wire.begin(ARDUINO);
   Wire.onReceive(received);
   Wire.onRequest(requested);
+
 }
 
 
@@ -172,4 +189,10 @@ void loop() {
     last_ping = millis();
   }
   delay(1000);
+  switch (currentStatus) {
+    case SPINNING:
+      procSpin();
+    case FINISHED:
+      procStop();
+  }
 }

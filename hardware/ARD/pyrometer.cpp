@@ -1,14 +1,18 @@
 #include "pyrometer.h"
+#include <Arduino.h>
 
 //constructor
 Pyrometer::Pyrometer() {
+  //this line fails as Arduino.h was not imported in pyrometer.h 
+  this->_input_pin = A0;
   for (int i = 0; i < sizeof(this->_function) / sizeof(this->_function[0]); i++)
     pinMode(this->_function[i], OUTPUT);
   pinMode(this->_input_pin, INPUT);
 };
 
 int Pyrometer::getReading() {
-  return analogRead(A0);
+  //TODO calibration
+  return analogRead(this->_input_pin);
 };
 
 //factor is 0-7

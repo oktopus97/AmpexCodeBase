@@ -4,7 +4,7 @@ import time
 import threading
 import common
 import queue
-from config import *
+from enums import *
 
 class SerialException(serial.serialutil.SerialException):
     pass
@@ -22,6 +22,7 @@ class Serializer():
         self.command_writer = open("command", "wb")
         
         self._recv_event = threading.Event()
+        self.stopper = threading.Event()
 
         self._write_q = queue.Queue()
         self._response_q = queue.Queue()
@@ -31,14 +32,11 @@ class Serializer():
     def writeline(self, string):
         self._write_q.put(string.encode() + b"\n")
     
-    def dialog(self, msg, *args, **kwargs):
+    def dialog(self, msg, event, *args, **kwargs):
         #func starts at line 107
         def throws():
-            self.stop_loop()
-            if kwargs.get('exc'):
-                raise kwargs['exc'](*kwargs.get("eargs"))
-            else:
-                raise SerialException('Dialog Failed')
+            return self.dialog(msg, event, *args, **kwargs)
+
         def _write(m):
             self._recv_event.clear()
             self.writeline(str(m))
@@ -48,10 +46,14 @@ class Serializer():
                 time.sleep(0.5)
                 if self._recv_event.is_set():
                     time.sleep(0.5)
-                    break
+                    return True
                 if tries < 1:
-                    print("recv event not set")
-                    throws()
+                    if self.stopper.is_set():
+                        return None
+                    else:
+                        print("recv event not set")
+                        throws()
+                        return None
 
         def get_response():
             tries = 10
@@ -82,28 +84,24 @@ class Serializer():
         
 
         #func starts here->
-        if type(msg) == tuple:
-            msg, event = msg[0], msg[1]
-            e = True
-        else:
-            e = False
         print(f"ask -> {msg}")
 
         self.serial.flush()
         self._recv_event.clear()
         time.sleep(0.5)
         resp = None
-        _write(msg) 
+        
+        if _write(msg) is None: return 
+
         if len(args) == 0:
             time.sleep(0.2)
 
-            if e:
-                event.set()
+            event.set()
             
             return check_response("OK")
         else:
             for i, arg in enumerate(args):
-                _write(arg)
+                if _write(arg) is None: return
                 if i < len(args) - 1:
                     check_response("?")
                 else:
@@ -111,9 +109,9 @@ class Serializer():
                         event.set()
                     return check_response("OK")
     
-    def send_command(self, command):
+    def send_command(self, command, *args):
         event = threading.Event()
-        self._dialog_q.put((command, event))
+        self._dialog_q.put((command, event, args))
             
         while True:
             if event.is_set():
@@ -136,15 +134,24 @@ class Serializer():
                 self.connected = True
             return True
     
-    def set_status(self, status: MachineStatus):
-        print(f"set {status}")
-        resp = self.send_command(str(Commands.SET_STAT.value) + str(status.value))
+    def set_status(self, status):
+        common.should_status = status if type(status) == int else status.value
+        resp = self.send_command(str(Commands.SET_STAT.value) + str(common.should_status))
+        return True
+
+    def set_ip(self, ip, gateway, subnet):
+        self.send_command(str(Commands.SET_IP.value), ip, gateway, subnet)
+    
+    def set_broker(self, broker_ip, broker_port):
+        self.send_command(str(Commands.SET_BROKER.value), broker_ip, broker_port)
+
+    def set_wifi(self, ssid, passwd):
+        self.send_command(str(Commands.SET_WIFI.value), ssid, passwd)
 
     def start_loop(self):
         self.serial = serial.Serial(self.port)
         self.serial.flush()
 
-        self.stopper = threading.Event()
         self.reader = threading.Thread(target=self.reader_thread, args=(self.stopper, self._recv_event,))
         self.writer = threading.Thread(target=self.writer_thread, args=(self.stopper,))
         self.dialogger = threading.Thread(target=self.dialog_thread, args=(self.stopper,))
@@ -158,8 +165,12 @@ class Serializer():
     def stop_loop(self):
         self.stopper.set()
         self.connected = False
-        time.sleep(0.5)
+        time.sleep(1)
         self.serial.close()
+        with self._dialog_q.mutex:
+            self._dialog_q.queue.clear()
+        with self._answers_q.mutex:
+            self._answers_q.queue.clear()
     
     def command_handler(self, command):
         commands_list = command.decode("ascii").split("\r\n")
@@ -167,20 +178,19 @@ class Serializer():
             if com == "":
                 continue
             if int(com) == Commands.PINGR.value:
-                self._dialog_q.put(Commands.PINGA.value)
+                
+                self._dialog_q.put((Commands.PINGA.value, threading.Event(), ()))
     
 
     def dialog_thread(self, ev):
-        while True:
-            jobs = []
             
-            while True:
-                if ev.is_set():
-                    return
-                job = self._dialog_q.get()
-                ans = self.dialog(job)
-                self._answers_q.put(ans)
-                time.sleep(1)
+        while True:
+            if ev.is_set():
+                return
+            job, event, args = self._dialog_q.get()
+            ans = self.dialog(job, event, *args)
+            self._answers_q.put(ans)
+            time.sleep(1)
 
     def reader_thread(self, ev, recv):
         dialog = False
@@ -197,6 +207,14 @@ class Serializer():
                 byte = self.serial.read()
                 line += byte
             print(f"read-> {line}")
+
+            if "Controller Not Found" in line.decode():
+                with self._dialog_q.mutex:
+                    self._dialog_q.queue.clear()
+                time.sleep(0.5)
+                self.ping_machine()
+                self.set_status(common.should_status)
+                continue
 
             if line[0] ==91:
                 common.log(line)

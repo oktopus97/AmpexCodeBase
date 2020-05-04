@@ -11,14 +11,18 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 matplotlib.use('TkAgg')
 import time
 import subprocess
+import configparser
 
 import mqtt
-from config import *
+from enums import *
 matplotlib.style.use("ggplot")
 
 class MainWindow(Tk):
     def __init__(self):
         super().__init__()
+        self.config = configparser.ConfigParser()
+        self.config.read("conf.ini")
+
         self.initiated = True
 
         self.ip = subprocess.check_output(['hostname', '-I']).decode('utf-8').split(' ')[0]
@@ -26,13 +30,15 @@ class MainWindow(Tk):
         self.toolbar = Frame(self)
 
         self.status = StringVar()
-        self.status.set('No Connection')
-        self.machine_status = StringVar()
-        self.usb_status = StringVar()
         self.wifi_status = StringVar()
+        self.usb_status = StringVar()
+        self.machine_status = StringVar()
 
-        Label(self.toolbar, textvariable=self.status).grid(row=1, column=0);
-        Label(self.toolbar, textvariable=self.machine_status).grid(row=2, column=0);
+        for i, var in enumerate((self.status, self.machine_status, self.usb_status,
+                                    self.wifi_status)):
+            var.set("No Connection")
+            Label(self.toolbar, textvariable=var).grid(row=i+1, column=0);
+
 
 
         self.start_button = Button(self.toolbar, text='Start', command=self.start)
@@ -85,7 +91,8 @@ class MainWindow(Tk):
     def mqtt_status(self, val):
         self._mqtt_status = val
         if val:
-            self.wifi_status.set(f"Server connected @{CONFIG_BROKER_IP}")
+            ip_addr = self.config["DEFAULTS"]["CONFIG_BROKER_IP"]
+            self.wifi_status.set(f"Server connected @{ip_addr}")
         else:
             self.wifi_status.set('Server disconnected')
 
@@ -93,6 +100,8 @@ class MainWindow(Tk):
             self.initiated = False
             self.status.set("Disconnected")
 
+    def get_serial_status(self):
+        return self.serial_status
     @property
     def serial_status(self):
         return self._serial_status
@@ -100,7 +109,7 @@ class MainWindow(Tk):
     def serial_status(self, val):
         self._serial_status = val
         if val:
-            self.usb_status.set('disconnected USB')
+            self.usb_status.set('Connected USB')
         else:
             self.usb_status.set('disconnected USB')
         if not self._mqtt_status or self._serial_status:
@@ -123,9 +132,8 @@ class MainWindow(Tk):
         frame.tkraise()
 
     def mqtt_disconnected(self):
-        if CONFIG_LOCALSERVER:
-            self.server.kill()
-            self.server.wait()
+        if self.serv:
+            subprocess.check_output(["pkill", "mosquitto"])
         self.mqtt_status=False
         self.mqtt_button["text"] = "Start MQTT"
 
@@ -133,31 +141,40 @@ class MainWindow(Tk):
         """
         for imlementation look class MQTTClient
         """
-        print("mqtt button pressed")
         if self.mqtt_status:
             self.mqtt_disconnected()
             return
         else:
-            if CONFIG_LOCAL_SERVER:
+            if bool(self.config["DEFAULTS"]["CONFIG_LOCAL_SERVER"]):
                 print("Starting Local Server")
                 #stop if mosquitto is already running, so communication with the
                 #server client is possible
-                if subprocess.run(["pkill",  "mosquitto"]).returncode != 1:
-                    time.sleep(3)
+                time.sleep(2)
                 self.status.set('Running Server')
-                self.server = subprocess.Popen(['mosquitto', "-p", str(CONFIG_BROKER_PORT)])
+                self.server = subprocess.Popen(['mosquitto', "-p", 
+                        str(self.config["DEFAULTS"]["CONFIG_BROKER_PORT"])])
                 time.sleep(1)
-                serv = True
+                self.serv = True
             else:
-                serv = False
+                self.serv = False
             self.mqtt_status = True
-            self.status.set("Local Server running" if serv else 
-                            "Conected to server @{}".format(CONFIG_BROKER_IP))
+            ip_addr = self.config["DEFAULT"]["CONFIG_BROKER_IP"]
+            self.status.set("Local Server running" if self.serv else 
+                            "Conected to server @{}".format(ip_addr))
             self.mqtt_client = mqtt.MQTTClient(client_id=('Ampex GUI @'+ self.ip))
+            tries = 0
+            while True:
+                if self.mqtt_client.ready:
+                    time.sleep(2)
+                    self.ready()
+                    break
+                elif tries > 10:
+                    self.wifi_status.set("no iblock detected")
+                    return self.mqtt_fkt()
+                else:
+                    time.sleep(0.5)
+                    tries += 1
             self.mqtt_button["text"] = "Stop MQTT"   
-            if self.initiated is False:
-                self.mqtt_client.ping_machine()
-                self.ready()
     
     def usb_disconnected(self):
         self.serial_button["text"] = "Start Serial"
@@ -169,7 +186,7 @@ class MainWindow(Tk):
             self.usb_disconnected()
             return self.serial_status
         else:
-            self.serializer = usb_serial.Serializer(CONFIG_SERIAL_PORT)
+            self.serializer = usb_serial.Serializer(self.config["DEFAULTS"]["CONFIG_SERIAL_PORT"])
 
             tries = 0
             while True:
@@ -183,13 +200,13 @@ class MainWindow(Tk):
                             self.status.set("NO USB FOUND") #TODO red
                             return -1
                         if e.errno == 13:
-                            self.status.set(f"run sudo chmod 777 {CONFIG_SERIAL_PORT}")
+                            port = self.config["DEFAULTS"]["CONFIG_SERIAL_PORT"]
+                            self.status.set(f"run sudo chmod 777 {port}")
                             return -1
             print("serial loop started")
             self.serial_status = True
             while True:
                 pi = self.serializer.ping_machine()
-                print(f"ping answer -> {pi}")
                 if pi  == 1:
                     break
 
@@ -210,25 +227,30 @@ class MainWindow(Tk):
             raise common.ControllerException('No Connection')
 
     def ready(self):
+        if self.initiated is False:
+            self.initiated = True
         clt = self.get_clt()
-        clt.set_status(MachineStatus.READY)
+        clt.set_status(common.should_status)
         
         common.ready = True
         self.start_button["state"] = "normal"
 
     def start(self):
         clt = self.get_clt()
-        self.clt.set_status(MachineStatus.SPINNING)
+        common.should_status = MachineStatus.SPINNING
+        clt.set_status(common.should_status)
         self.start_button["state"] = "disabled"
         self.stop_button["state"] = "normal"
         time.sleep(3)
-        self.PlotsFrame.start_plotting()
+        self.frames["PlotsFrame"].start_plotting()
     
     def stop(self):
         clt = self.get_clt()
-        self.clt.set_status(MachineStatus.INTERRUPT)
+        common.should_status = MachineStatus.INTERRUPT
+        clt.set_status(common.should_status)
         self.stop_button["state"] = "disabled"
         self.start_button["state"] = "normal"
+        self.frames["PlotsFrame"].stop_plotting()
 
 class PlotsFrame(Frame):
     def __init__(self, master, controller):
@@ -237,6 +259,8 @@ class PlotsFrame(Frame):
         self.controller = controller
         self.fig, self.axes = plt.subplots(nrows=2, ncols=2)
         self.canvas = FigureCanvasTkAgg(self.fig, self)
+        self.log = open("log", "r+")
+        self.log.seek(0)
         self.times = []
 
         #example sensors
@@ -250,20 +274,113 @@ class PlotsFrame(Frame):
 
         common.set_plots(self.times, self.sensors)
     
-    def update_plots(self, i):
+    def update_plots(self):
+        if self.plot:
+            self.after(2000, self.update_plots)
+        if self.log_lines == 500:
+            self.log.seek(0)
+        self.log.seek(0)
+
+        lines = self.log.readlines()
+        for line in lines:
+            common.log_handler(line)
+        self.log.seek(0)
+        self.log.truncate(0)
+
         for value in self.sensors.values():
             value[1].clear()
             value[1].plot(value[0])
         self.canvas.draw()
    
     def start_plotting(self):
-        ani = anim.FuncAnimation(self.fig, self.update_plots)
-
+        self.log_lines = 0
+        common.start_logging()
+        self.plot = True
+        self.after(1000, self.update_plots)
+    
+    def stop_plotting(self):
+        common.stop_logging()
+        self.plot = False
 
 class ConfigFrame(Frame):
     def __init__(self, master, controller):
         super().__init__(master)
+        self.conf = master.master.config
+        self.serial_status = master.master.get_serial_status
+        self.get_clt = master.master.get_clt
         self.controller = controller
+        self.local_server = IntVar()
+        self.local_server.set(int(self.conf["DEFAULTS"]["CONFIG_LOCAL_SERVER"]))
+        Checkbutton(self, text="Local Server", 
+                variable=self.local_server,
+                command=self.local_server_check).grid(row=0, column=0)
+        self.entries = {}
+        for i, conf in enumerate(self.conf["DEFAULTS"].keys()):
+            if conf == "config_local_server":
+                continue
+            Label(self, text=conf[6::].replace("_", " ")).grid(row=i+1, column=0)
+            entry = Entry(self)
+            entry.grid(row=i+1, column=1)
+            self.entries[conf] = entry
+        self.read_defaults()
+        
+        Button(self, text="Save Config", command=self.save).grid(row=1, column=3)
+        flashers = []
+        for i, feature in enumerate(("IP", "Broker Settings", "WiFi Settings")):
+            function_name = "flash_" + feature.replace(" ", "_")
+            flashers.append(Button(self,text=f"Flash {feature}", 
+                command=getattr(self, function_name)))
+            flashers[-1].grid(row=1, column=i+4)
+
+    def save(self):
+        for key, entry in self.entries.items():
+            self.conf["DEFAULTS"][key] = entry.get()
+            with open("conf.ini", "w") as f:
+                self.conf.write(f)
+
+    def flash_IP(self):
+        self.save()
+        if not self.serial_status():
+            print("Serial Not On")
+            return
+        self.get_clt().set_ip(self.conf["DEFAULTS"]["config_machine_ip"], 
+                        self.conf["DEFAULTS"]["config_gateway"],
+                        self.conf["DEFAULTS"]["config_subnet"])
+    def flash_Broker_Settings(self):
+        if not self.serial_status():
+            print("Serial Not On")
+            return
+        self.save()
+        self.get_clt().set_broker(self.conf["DEFAULTS"]["config_broker_ip"],
+                                  self.conf["DEFAULTS"]["config_broker_port"])
+
+    def flash_WiFi_Settings(self):
+        if not self.serial_status():
+            print("Serial Not On")
+            return
+        self.save()
+        self.get_clt().set_wifi(self.conf["DEFAULTS"]["config_wifi_ssid"],
+                                self.conf["DEFAULTS"]["config_wifi_password"])
+
+    def read_defaults(self):
+        for key, entry in self.entries.items():
+            entry.delete(0, END)
+            entry.insert(0, self.conf["DEFAULTS"][key])
+
+    def local_server_check(self):
+        if self.local_server.get():
+            self.conf["DEFAULTS"]["CONFIG_LOCAL_SERVER"] = "1"
+            self.conf["DEFAULTS"]["CONFIG_BROKER_IP"] = "localhost"
+            self.entries["config_broker_ip"].configure(state="disabled")
+        else:
+            self.conf["DEFAULTS"]["CONFIG_LOCAL_SERVER"] = "0"
+            self.entries["config_broker_ip"].configure(state="normal")
+        with open("conf.ini", "w") as f:
+            f.seek(0)
+            self.conf.write(f)
+            
+            
+
 
 if __name__ == "__main__":
     app = MainWindow()

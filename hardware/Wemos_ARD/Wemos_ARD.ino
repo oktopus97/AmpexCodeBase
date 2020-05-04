@@ -2,6 +2,7 @@
 #include "config.h"
 
 int MQTT_LED = 2;
+int RESET_PIN = 16;
 
 WiFiClient net;
 
@@ -24,7 +25,12 @@ Status currentStatus;
 #include <Wire.h>
 //all for ardunio communication
 
-
+void reset_arduino() {
+  LOG("RESETTING ARD", WARN);
+  digitalWrite(RESET_PIN, HIGH);
+  delay(200);
+  digitalWrite(RESET_PIN, HIGH);
+}
 void clear_buffer(uint8_t * buff, int len) {
   uint8_t *ptr = buff;
   for (ptr; (ptr - buff) < len; ptr++) *ptr = -1;
@@ -49,6 +55,19 @@ int recv_i2c(uint8_t * buff, int port, int howMany) {
     Wire.requestFrom(port, howMany);
   }
   delay(100);
+  int tries = 10; 
+  while (true) {
+    if (tries < 1) {
+      reset_arduino();
+      return -1;
+    }
+    if (Wire.available())
+      break;
+    else {
+      delay(300);
+      tries--;
+    }
+  }
   while (Wire.available()) {
     *ptr = Wire.read();
     ptr++;
@@ -99,8 +118,11 @@ MQTTClient mqtt;
 bool serverConnected = false;
 bool connectMQTT(uint8_t tries) {
   uint8_t t = tries;
+  if (mqtt.connected()) return mqtt.connected();
+  else serverConnected = false;
+  
   LOG("connecting to mqtt server...");
-  bool c = (bool)mqtt.connect("ESP", "try", "try");
+  bool c = (bool)mqtt.connect("ESP", "try", "try");  
   while (!c) {
     delay(500);
     tries--;
@@ -113,11 +135,11 @@ bool connectMQTT(uint8_t tries) {
 
   LOG("connected to mqtt!");
   serverConnected = true;
+  
 
-  mqtt.subscribe("/Commands");
-  //connection message has a qos of 2
-  //this means it will reach the server at least once
-  publishtoInfoServer("IBLOCK CONNECT", false, 2);
+  mqtt.subscribe("/Commands/#");
+    
+  publishtoInfoServer("IBLOCK CONNECT", true, 1);
   return 1;
 }
 
@@ -160,7 +182,7 @@ uint8_t getArgsfromPayload(){
   payload++;
 
   //loop not breakin w/o if clause
-  while(true) {
+  while((int)*payload != 59) {
 
     //ascii --> 59 is ';' , 0 is '\0' 
 
@@ -209,36 +231,24 @@ enum controller:uint8_t {
 controller master = NONE;
 
 bool mqttMsgRecv = false;
-bool pingController(uint8_t tries) {
+bool pingController(uint8_t tries) { 
   uint8_t t = tries;
   pinged = false;
   uint8_t wifi_failed = false;
-  
-  while (true) { 
-    if (master == NONE) {
+  if (mqtt.connected() && master == REMOTE) return 1;
+  if (master == NONE) {
       return false;
-    }else if (master == REMOTE) {
-      mqttMsgRecv = false;
-      publishtoInfoServer(String(PINGR).c_str(), false, 1);
-      delay(1000);
-      while(true) {
-        delay(500);
-        t--;
-        if (mqttMsgRecv) {
-          t = tries;
-          break;
-        } else if (t < 1) {
-          master = NONE;
-          return 0;
-        }
-      }
-    } else if (master == USB) {
+    }
+  t = tries;
+  while (true) { 
+  if (master == USB) {
       Serial.println('#');
       Serial.println(PINGR);
       Serial.println('*');
-      delay(5000);
+      delay(3000);
       checkSerial();
     }
+    
     
     t--;
     if (pinged) return 1;
@@ -293,6 +303,12 @@ String getLine(){
 int checkSerial() {
   if (!Serial.available()) return 0;
   String line = getLine();
+  if (line[0] == '#'){
+    do {
+      line = getLine();
+    } while(line[0] != '*');
+    return 0;
+  }
   LOG("Recieved from USB");
   LOG(line.c_str());
   uint8_t command = (int)line[0] - 48;
@@ -315,14 +331,17 @@ int checkSerial() {
       delay(50);
       line = getLine();
       setIpAddressfromString((IPAddress*)&CONFIG_SUBNET, line.c_str());
+      connectWiFi(5);
       break;
     case SET_BROKER:
+      if (mqtt.connected()) mqtt.disconnect();
       line = getLine();
       setIpAddressfromString((IPAddress*)&CONFIG_BROKER_IP, line.c_str());
       Serial.println("?");
       delay(50);
       line = getLine().c_str();
       setIntfromString(&CONFIG_BROKER_PORT, line.c_str());
+      connectMQTT(5);
       break;
     case SET_WIFI:{ 
       LOG("Setting WiFi");
@@ -332,6 +351,7 @@ int checkSerial() {
       delay(50);
       line = getLine();
       CONFIG_WIFI_PASS = line;
+      connectWiFi(5);
       break;
     }
     case SET_MODE:
@@ -345,7 +365,7 @@ int checkSerial() {
       LOG("SERIAL PING REQUESTED");
       Serial.println(PINGA);
       delay(20);
-      if (master==NONE) {
+      if (master!=USB) {
         LOG("INIT USB CONNECTION");
         master=USB;
       }
@@ -368,8 +388,6 @@ int checkSerial() {
 
 uint8_t setStat(uint8_t stat) {
   should_status = (Status)stat;
-  LOG("Setting Status");
-  LOG(String(should_status).c_str());
   uint8_t * command = (uint8_t*)malloc(3);
   * command = (uint8_t)SETSTATUS;
   * (command + 1) = stat;
@@ -377,11 +395,10 @@ uint8_t setStat(uint8_t stat) {
   dialogArduino(command,2,1);
   Status ret = (Status)_Buffer[COMMAND_SUB_BUFFER];
   while (ret != stat) {
-    LOG((const char *)command);
     dialogArduino(command,2,1);
-    Status ret = (Status)_Buffer[COMMAND_SUB_BUFFER];
+    ret = (Status)_Buffer[COMMAND_SUB_BUFFER];
   };
-  LOG(("STATUS SET -> " + String(ret)).c_str());
+  LOG(("Status set to " + String(ret)).c_str());
   currentStatus = ret;
   if (should_status != currentStatus) return -1;
   clear_buffer((uint8_t*)&_Buffer, 1);
@@ -396,17 +413,31 @@ void messageReceived(String &topic, String &pyld) {
   LOG(topic.c_str());
   LOG("payload");
   LOG(pyld.c_str());
-
+  
   if (master == USB) {
     LOG("USB IS CONNECTED, MQTT COMMANDS ARE DISABLED", 2);
     return;
+  }
+  
+  if (topic.indexOf("Status") != -1) {
+    if (pyld.indexOf("Online") != -1){
+      if (master == NONE) {
+          master = REMOTE;
+          return;
+        }
+        return;
+    }
+        
+    else if (master == REMOTE){ 
+      master = NONE;
+      return;
+    }
   }
   payload = (char*)pyld.c_str();
   uint8_t first_byte = getArgsfromPayload();
   switch (first_byte) {
     case SET_STAT:
       payload++;
-      LOG(("SETTING STATUS " + String((uint8_t)*payload-48)).c_str());
       setStat((uint8_t)*payload-48);
       break;
     case GPIOREAD:{
@@ -454,11 +485,7 @@ void messageReceived(String &topic, String &pyld) {
       break;
     }
     case PINGA:
-      LOG("PINGED FROM MQTT SERVER");
-      if (master == NONE) {
-        master = REMOTE;
-        break;
-      }
+      
       pinged = true;
       break;
     default:
@@ -499,8 +526,8 @@ void i2c_callback() {
   for (int i=0; i < NOSENSORS-1; i++) {
     sprintf((char*)ptr, "%03.6f, ", readings[i]);
     ptr += 9;
-    if ((int)readings[i] > 10) ptr++;
-    if ((int)readings[i] > 100) ptr++;
+    if ((int)readings[i] >= 10) ptr++;
+    if ((int)readings[i] >= 100) ptr++;
     
   }
   sprintf((char*)ptr, "%03.6f", readings[NOSENSORS-1]);
@@ -555,22 +582,23 @@ void connectArduino() {
 
 bool connectController() {
   checkSerial();
-  if (CONFIG_MODE=MQTT) {
+  if (CONFIG_MODE==MQTT) {
     //connect to wifi
-    LOG("Connecting WiFi");
+    
     if (WiFi.status() != WL_CONNECTED && !connectWiFi(50)) { 
+      LOG("Connecting WiFi");
       digitalWrite(BUILTIN_LED, LOW);
       LOG("WiFi Connection failed", WARN);
-    } else if (!serverConnected) {
-      mqtt.begin(CONFIG_BROKER_IP.toString().c_str(), net);
-      mqtt.onMessage(messageReceived);
+    } else {
+      
     
       if (!connectMQTT(5)){
-        LOG("ERR 3, NO SERVER FOUND", ERR);  
+        LOG("ERR 3, NO SERVER FOUND", ERR); 
         digitalWrite(BUILTIN_LED, LOW);
       }
     }
-  }  
+  }
+
   if (!pingController(10)){
     return 0;
   } else return 1;
@@ -579,9 +607,14 @@ bool connectController() {
 void setup() {
   Serial.begin(9600);
   pinMode(BUILTIN_LED, OUTPUT);
+  pinMode(RESET_PIN, OUTPUT);
   if (CONFIG_MODE == MQTT) digitalWrite(BUILTIN_LED, HIGH);
   else digitalWrite(BUILTIN_LED, LOW);
   Wire.begin();
+  mqtt.begin(CONFIG_BROKER_IP.toString().c_str(), net);
+  mqtt.onMessage(messageReceived);
+  mqtt.setWill("/Info", "IBLOCK DISCONNECT", true, 1);
+
   
   should_status = INIT;
   connectArduino();
@@ -590,8 +623,9 @@ void setup() {
 }
 
 void loop() {
+  mqtt.loop();
   checkSerial();
-  if (!pingController(10)){
+  if (!pingController(5)){
     LOG("Controller Not Found", WARN);
     if (!connectController()) {
       LOG("Setting init status", WARN);
@@ -606,7 +640,7 @@ void loop() {
     LOG("Arduino disconnected");
     connectArduino();
   }  
-  delay(3000);
+  delay(5000);
 
   if (master != NONE) {
      //loop

@@ -26,12 +26,3 @@ class Commands(IntEnum):
     GPIOWRITE = 7
     PINGA = 8
     PINGR = 9
-
-CONFIG_BROKER_PORT = 1883
-CONFIG_BROKER_IP = 'localhost' #localhost
-
-CONFIG_LOCAL_SERVER = True
-
-CONFIG_SERIAL_PORT = "/dev/ttyUSB0"
-
-CONFIG_MAXPLOT = 500
