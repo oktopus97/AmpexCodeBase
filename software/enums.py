@@ -1,4 +1,4 @@
-##make sure to change hardware variables 
+##make sure to change hardware variables
 ##else finger weg !!
 from enum import IntEnum
 
@@ -10,19 +10,18 @@ class ConnectionModes(IntEnum):
 class MachineStatus(IntEnum):
     INIT = 1
     READY = 2
-    SENSORERR = 3
-    WAITING = 4
-    SPINNING = 5
-    FINISHED = 6
-    INTERRUPT = 7
+    HEAT = 3
+    SPIN = 4
+    COOL = 5
+    INTERRUPT = 6
 
 class Commands(IntEnum):
     SET_STAT = 1
     SET_IP = 2
     SET_BROKER = 3
     SET_WIFI = 4
-    SET_MODE = 5
-    GPIOREAD = 6
-    GPIOWRITE = 7
-    PINGA = 8
-    PINGR = 9
+    GPIOREAD = 5
+    GPIOWRITE = 6
+    PINGA = 7
+    PINGR = 8
+    INVALID = 9

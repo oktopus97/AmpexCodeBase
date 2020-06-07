@@ -1,5 +1,7 @@
 #include <ESP8266WiFi.h>
 #include "config.h"
+#include <Adafruit_MCP9808.h>
+
 
 int MQTT_LED = 2;
 int RESET_PIN = 16;
@@ -11,6 +13,7 @@ WiFiClient net;
 //---------------------------i2c variables----------------------
 #define ESP8266                   0
 #define ARDUINO                   1
+#define MCPT                      2
 
 #define BUFFER_SIZE               64
 #define SUB_BUFFER_SIZE           16
@@ -42,7 +45,7 @@ void send_i2c(uint8_t * buff, int len) {
     Wire.write(*(buff + i));
     delay(15);
     *(buff + i) = -1;
-    
+
   }
   Wire.endTransmission();
   delay(500);
@@ -55,10 +58,11 @@ int recv_i2c(uint8_t * buff, int port, int howMany) {
     Wire.requestFrom(port, howMany);
   }
   delay(100);
-  int tries = 10; 
+  int tries = 5;
   while (true) {
     if (tries < 1) {
       reset_arduino();
+      LOG("Arduino Connection Failed", ERR);
       return -1;
     }
     if (Wire.available())
@@ -83,13 +87,14 @@ void dialogArduino(uint8_t * command,int len, int expected_bytes) {
     ptr++;
   }
   send_i2c((uint8_t *)&_Buffer[COMMAND_SUB_BUFFER], len);
-  recv_i2c((uint8_t*)&_Buffer[COMMAND_SUB_BUFFER], ARDUINO, expected_bytes);
+  if (!recv_i2c((uint8_t*)&_Buffer[COMMAND_SUB_BUFFER], ARDUINO, expected_bytes)) setStat(INIT);
 }
 uint8_t pingArduino() {
   uint8_t command = (uint8_t)PING;
   dialogArduino(&command,1,1);
   uint8_t ret = (uint8_t)_Buffer[COMMAND_SUB_BUFFER];
   clear_buffer((uint8_t*)(&_Buffer + COMMAND_SUB_BUFFER), 1);
+  if (ret != 1) should_status = INIT;
   return ret;
 }
 
@@ -120,9 +125,9 @@ bool connectMQTT(uint8_t tries) {
   uint8_t t = tries;
   if (mqtt.connected()) return mqtt.connected();
   else serverConnected = false;
-  
+
   LOG("connecting to mqtt server...");
-  bool c = (bool)mqtt.connect("ESP", "try", "try");  
+  bool c = (bool)mqtt.connect("ESP", "try", "try");
   while (!c) {
     delay(500);
     tries--;
@@ -135,10 +140,10 @@ bool connectMQTT(uint8_t tries) {
 
   LOG("connected to mqtt!");
   serverConnected = true;
-  
+
 
   mqtt.subscribe("/Commands/#");
-    
+
   publishtoInfoServer("IBLOCK CONNECT", true, 1);
   return 1;
 }
@@ -184,7 +189,7 @@ uint8_t getArgsfromPayload(){
   //loop not breakin w/o if clause
   while((int)*payload != 59) {
 
-    //ascii --> 59 is ';' , 0 is '\0' 
+    //ascii --> 59 is ';' , 0 is '\0'
 
     ret *= 10;
     ret += (uint8_t)*payload - 48;
@@ -196,18 +201,47 @@ uint8_t getArgsfromPayload(){
 
 }
 
-                       
 
-//-----------log----------------------
+
+//-----------log commands-------------------
+#include <SPI.h>
+#include <SD.h>
+const int chip_select = D8;
+Status getStatusfromSD(){
+  if (SD.exists("/Status.txt")) {
+    File _s = SD.open("/Status.txt");
+    int _state = _s.read();
+    _s.close();
+    return (Status)_state;
+  } else 
+    return READY;
+};
+
+void setStatusfromSD() {
+  should_status = getStatusfromSD();
+  setStat(should_status);
+}
+
+void saveStatus() {
+  if (!SD.exists("/Status.txt")) {
+     SD.mkdir("/Status.txt");
+  }
+  File _s = SD.open("Status.txt");
+  _s.print('\b');
+  _s.print(should_status);
+}
 
 int start_time = millis();
-
 
 void LOG(const char * msg, int level) {
   //TODO add sd card
   String lg ="[" + String(millis()-start_time) + "];[" + String(currentStatus) +"];[" + String(level) + "];[" + msg +"]";
   //all logs are printed to serial, also saved.. TODO
   Serial.println(lg);
+  File logger = SD.open("/log.txt", FILE_WRITE);
+  logger.println(lg);
+  logger.close();
+  
   if (serverConnected) {
     if (level == 2) publishtoErrorServer(lg.c_str(), false, 1);
     else if (level == 1) publishtoServer(lg.c_str());
@@ -231,7 +265,7 @@ enum controller:uint8_t {
 controller master = NONE;
 
 bool mqttMsgRecv = false;
-bool pingController(uint8_t tries) { 
+bool pingController(uint8_t tries) {
   uint8_t t = tries;
   pinged = false;
   uint8_t wifi_failed = false;
@@ -240,7 +274,7 @@ bool pingController(uint8_t tries) {
       return false;
     }
   t = tries;
-  while (true) { 
+  while (true) {
   if (master == USB) {
       Serial.println('#');
       Serial.println(PINGR);
@@ -248,55 +282,80 @@ bool pingController(uint8_t tries) {
       delay(3000);
       checkSerial();
     }
-    
-    
+
+
     t--;
     if (pinged) return 1;
     else if (t < 1 && !pinged) {
       LOG("PING FAILED");
-      master = NONE;
+      if (serverConnected) master = REMOTE;
+      else master = NONE;
       return 0;
     }
   }
 
-} 
+}
 //-----------------------Serial commands for usb----------------
-void setIntfromString(int * global_int, const char * int_to_set) { 
-  * global_int = 0;
-  int digit_ctr = 0;
-  while (* int_to_set != '\0') {
-    int_to_set++;
-    digit_ctr++;
-  }
-  do {
-    * global_int += 10 * ((int)*int_to_set - 48);
-    digit_ctr--;
-    delay(20);
-  }while (digit_ctr > 0);
+void setIntfromString(int * global_int, const char * int_to_set, int len) {
+  * global_int = getIntFromString(int_to_set, len);
+}
+int getIntFromString(const char *int_string, int len) {
+  int ret = ((int)*int_string - 48);
+  len--;
+  int_string++;
+  while (len > 0) {
+    ret = 10 * ret;
+    ret += ((int)*int_string - 48);
     
+    int_string++;
+    len--;
+    delay(20);
+  }
+  return ret;
 }
 
 void setIpAddressfromString(IPAddress * global_ip, const char * line) {
   IPAddress glob =  * global_ip;
+  LOG((String(glob[1]) + String(glob[2]) + String(glob[3]) + String(glob[4])).c_str()); 
+  const char * l = line;
   char * initial_ptr  = (char *)malloc(4);
   char * p = (char*)initial_ptr;
-  
+  memset(p, 0, 4);
+
+  int len = 0;
+
   for (int i=0; i<4; i++) {
-    do {
-    * p = * line;
-    delay(20);
-    p++;
-    line++;
-    } while (*line != '\"' || *line != '.');
     
-    setIntfromString((int*)&glob[i], (const char *)initial_ptr);
-    delay(20);    
-    p = initial_ptr;
+    while (true) {
+    * p = * l;
+    p++;
+    len++;
+    l++;
+    if (*l == '%' || *l == '.') {
+      l++;
+
+      break;
+    }
+    }
+    
+    glob[i] = getIntFromString((const char *)initial_ptr, len);
+    delay(20);
+    p = (char*)initial_ptr;
+    memset(p, 0, 4);
+    len = 0;
   }
 }
 
 String getLine(){
-  String l = Serial.readStringUntil('\n');
+  String l;
+  int start = millis();
+  while (!Serial.available()) {
+    delay(100);
+  }
+  do {
+    l = Serial.readStringUntil('\n');
+  } while(l.length() == 0);
+  if (l == "\n") return getLine();
   return l;
 }
 
@@ -315,52 +374,60 @@ int checkSerial() {
   Serial.println('^');
   Serial.println(command);
   delay(20);
-  
+
   switch (command) {
     case SET_STAT:
       setStat((Status)((int)line[1]-48));
       break;
-    case SET_IP: 
+    case SET_IP:
+      Serial.println("?");
+      delay(50);
+
       line = getLine();
+      LOG(line.c_str());
       setIpAddressfromString((IPAddress*)&CONFIG_MACHINE_IP, line.c_str());
+      Serial.println('^');
       Serial.println("?");
       delay(50);
       line = getLine();
       setIpAddressfromString((IPAddress*)&CONFIG_GATEWAY, line.c_str());
+      Serial.println('^');
       Serial.println("?");
       delay(50);
       line = getLine();
       setIpAddressfromString((IPAddress*)&CONFIG_SUBNET, line.c_str());
       connectWiFi(5);
+      Serial.println('^');
       break;
     case SET_BROKER:
       if (mqtt.connected()) mqtt.disconnect();
-      line = getLine();
-      setIpAddressfromString((IPAddress*)&CONFIG_BROKER_IP, line.c_str());
       Serial.println("?");
       delay(50);
-      line = getLine().c_str();
-      setIntfromString(&CONFIG_BROKER_PORT, line.c_str());
+      line = getLine();
+      setIpAddressfromString((IPAddress*)&CONFIG_BROKER_IP, line.c_str());
+      Serial.println('^');
+      Serial.println("?");
+      delay(50);
+      line = getLine();
+      setIntfromString(&CONFIG_BROKER_PORT, line.c_str(), 4);
       connectMQTT(5);
+      Serial.println('^');
       break;
-    case SET_WIFI:{ 
+    case SET_WIFI:{
       LOG("Setting WiFi");
+      Serial.println("?");
+      delay(50);
       line = getLine();
       CONFIG_WIFI_SSID = line;
+      Serial.println('^');
       Serial.println("?");
       delay(50);
       line = getLine();
       CONFIG_WIFI_PASS = line;
       connectWiFi(5);
+      Serial.println('^');
       break;
     }
-    case SET_MODE:
-      LOG("SETTING MODE");
-      LOG((const char *)&line[1]);
-      CONFIG_MODE = (ConnectionMode)((int)line[1]-48);
-      delay(15);
-      break;
-      
     case PINGR:
       LOG("SERIAL PING REQUESTED");
       Serial.println(PINGA);
@@ -378,6 +445,9 @@ int checkSerial() {
       LOG("INVALID COMMAND", WARN);
       LOG(String(command).c_str(), WARN);
       Serial.flush();
+      delay(15);
+      Serial.println(INVALID);
+      Serial.println("$");
       return 0;
   }
   Serial.println("OK");
@@ -388,18 +458,23 @@ int checkSerial() {
 
 uint8_t setStat(uint8_t stat) {
   should_status = (Status)stat;
+  
   uint8_t * command = (uint8_t*)malloc(3);
   * command = (uint8_t)SETSTATUS;
   * (command + 1) = stat;
   * (command + 2) = '\0';
   dialogArduino(command,2,1);
+  
   Status ret = (Status)_Buffer[COMMAND_SUB_BUFFER];
+  
   while (ret != stat) {
     dialogArduino(command,2,1);
     ret = (Status)_Buffer[COMMAND_SUB_BUFFER];
   };
+  
   LOG(("Status set to " + String(ret)).c_str());
   currentStatus = ret;
+  saveStatus();
   if (should_status != currentStatus) return -1;
   clear_buffer((uint8_t*)&_Buffer, 1);
   return currentStatus;
@@ -413,12 +488,12 @@ void messageReceived(String &topic, String &pyld) {
   LOG(topic.c_str());
   LOG("payload");
   LOG(pyld.c_str());
-  
+
   if (master == USB) {
     LOG("USB IS CONNECTED, MQTT COMMANDS ARE DISABLED", 2);
     return;
   }
-  
+
   if (topic.indexOf("Status") != -1) {
     if (pyld.indexOf("Online") != -1){
       if (master == NONE) {
@@ -427,8 +502,8 @@ void messageReceived(String &topic, String &pyld) {
         }
         return;
     }
-        
-    else if (master == REMOTE){ 
+
+    else if (master == REMOTE){
       master = NONE;
       return;
     }
@@ -441,16 +516,16 @@ void messageReceived(String &topic, String &pyld) {
       setStat((uint8_t)*payload-48);
       break;
     case GPIOREAD:{
-      
+
       uint8_t *command = (uint8_t*)malloc(4);
-      
+
       *command = (uint8_t)GPIO_READ;
       *(command + 1) = getArgsfromPayload();
       *(command + 2) = getArgsfromPayload();
       *(command + 3) = getArgsfromPayload();
       if (*command == 255 || *(command + 1) == 255 || *(command + 2) == 255 ||*(command + 3) == 255) {
         LOG("please give enough arguments",ERR);
-        return; 
+        return;
       }
       dialogArduino(command, 4,1);
       if (payload[1] == 'd')
@@ -463,7 +538,7 @@ void messageReceived(String &topic, String &pyld) {
       clear_buffer((uint8_t*)&_Buffer, 1);
       break;
     }
-      
+
     case GPIOWRITE:{
       uint8_t*command = (uint8_t*)malloc(4);
       *command = (uint8_t)GPIO_WRITE;
@@ -472,7 +547,7 @@ void messageReceived(String &topic, String &pyld) {
       *(command + 3) = getArgsfromPayload();
       if (*command == 255 || *(command + 1) == 255 || *(command + 2) == 255 ||*(command + 3) == 255) {
         LOG("Not enough args received",ERR);
-        return; 
+        return;
       }
       dialogArduino(command, 4,1);
       LOG(String(_Buffer[0]).c_str(), DATA);
@@ -485,10 +560,11 @@ void messageReceived(String &topic, String &pyld) {
       break;
     }
     case PINGA:
-      
+
       pinged = true;
       break;
     default:
+      publishtoInfoServer(String(INVALID).c_str(), 0, 0);
       LOG("UNRECOGNIZED COMMAND", 2);
       LOG(payload,2);
   }
@@ -496,7 +572,7 @@ void messageReceived(String &topic, String &pyld) {
   payload -= pyld.length();
 
 
-  
+
   // Note: Do not use the client in the callback to publish, subscribe or
   // unsubscribe as it may cause deadlocks when other things arrive while
   // sending and receiving acknowledgments. Instead, change a global variable,
@@ -505,16 +581,21 @@ void messageReceived(String &topic, String &pyld) {
 
 
 //--------------i2ccallback---------------
+Adafruit_MCP9808 ambient = Adafruit_MCP9808();
 void i2c_callback() {
   Wire.requestFrom(ARDUINO, 1 + sizeof(float) * NOSENSORS);
   uint8_t *ptr = (uint8_t*)&_Buffer;
-  recv_i2c(ptr, ARDUINO, 0);
+  if (!recv_i2c(ptr, ARDUINO, 0)) {
+    setStat(INIT);
+    return;
+  }
   uint8_t _stat = *ptr;
-  if (_stat == SENSORERR) publishtoErrorServer("FAT2", true, 1);;
   ptr++;
   //read the sensor floats to buffer
   float readings[NOSENSORS];
-  for (int i; i < NOSENSORS; i++){
+  readings[0] = ambient.readTempC();
+  
+  for (int i =1; i < NOSENSORS; i++){
     memcpy((float *)&readings[i], ptr, sizeof(readings[0]));
     ptr += sizeof(readings[0]);
   }
@@ -528,12 +609,12 @@ void i2c_callback() {
     ptr += 9;
     if ((int)readings[i] >= 10) ptr++;
     if ((int)readings[i] >= 100) ptr++;
-    
+
   }
   sprintf((char*)ptr, "%03.6f", readings[NOSENSORS-1]);
   LOG(post,DATA);
- 
-  
+
+
 }
 
 
@@ -564,19 +645,23 @@ bool connectWiFi(int max_tries) {
   return true;
 }
 
-void connectArduino() {
+bool arduinoConnected = false;
+
+bool connectArduino() {
     int tries = 0;
     while((int)pingArduino()!=1){
       delay(100);
       tries++;
       if (tries > 50) {
         tries = 0;
+        arduinoConnected = false;
         LOG("FAT1 ARDUINO NOT FOUND", ERR);
-        LOG("Trying again",  ERR);
+        return false;
       }
     }
-    while (should_status != setStat(should_status)) delay(100);
+    arduinoConnected = true;
     arduinoLight(true);
+    return true;
 };
 
 
@@ -584,16 +669,16 @@ bool connectController() {
   checkSerial();
   if (CONFIG_MODE==MQTT) {
     //connect to wifi
-    
-    if (WiFi.status() != WL_CONNECTED && !connectWiFi(50)) { 
-      LOG("Connecting WiFi");
+    LOG("Connecting WiFi");
+    if (WiFi.status() != WL_CONNECTED && !connectWiFi(50)) {
+      
       digitalWrite(BUILTIN_LED, LOW);
       LOG("WiFi Connection failed", WARN);
     } else {
-      
-    
+
+
       if (!connectMQTT(5)){
-        LOG("ERR 3, NO SERVER FOUND", ERR); 
+        LOG("ERR 3, NO SERVER FOUND", ERR);
         digitalWrite(BUILTIN_LED, LOW);
       }
     }
@@ -604,46 +689,93 @@ bool connectController() {
   } else return 1;
 }
 
+//     procedures
+
+//run on all other states (other than ready and init) 
+//as the communications stay the same
+void _default(){
+  if (!pingController(5)){
+    LOG("Controller Not Found", WARN);
+    if (!connectController()) {
+      LOG("Setting READY status", WARN);
+      should_status=READY;
+      master = NONE;
+      setStat(should_status);
+    }
+  }
+}
+
+void _init() {  
+  if (!SD.begin(chip_select)) {
+    return;
+  }
+  if (arduinoConnected) {
+    setStatusfromSD();
+    return;
+  } else {
+    should_status = INIT;
+    //initialize hw
+    while (!connectArduino()) delay(100);
+    setStatusfromSD(); 
+  }
+}
+
+void _ready() {
+  if (master == NONE) {
+    connectController();
+  }else {
+    _default();
+  }
+}
+
+
+
 void setup() {
   Serial.begin(9600);
+  ambient.begin();
+  
+  //TODO SET LEDs
   pinMode(BUILTIN_LED, OUTPUT);
+
+  //TODO reset mechanism
   pinMode(RESET_PIN, OUTPUT);
-  if (CONFIG_MODE == MQTT) digitalWrite(BUILTIN_LED, HIGH);
-  else digitalWrite(BUILTIN_LED, LOW);
+
   Wire.begin();
+  
   mqtt.begin(CONFIG_BROKER_IP.toString().c_str(), net);
   mqtt.onMessage(messageReceived);
   mqtt.setWill("/Info", "IBLOCK DISCONNECT", true, 1);
 
-  
-  should_status = INIT;
-  connectArduino();
-  
-  connectController();
+  setStatusfromSD();
+    
 }
-
 void loop() {
   mqtt.loop();
   checkSerial();
-  if (!pingController(5)){
-    LOG("Controller Not Found", WARN);
-    if (!connectController()) {
-      LOG("Setting init status", WARN);
-      should_status=INIT;
-      setStat(should_status);
-    }
-  }
-  i2c_callback();
-  delay(10);
-  if ((int)pingArduino() != 1) {
-    arduinoLight(false);
-    LOG("Arduino disconnected");
-    connectArduino();
-  }  
-  delay(5000);
 
-  if (master != NONE) {
-     //loop
-    delay(1);
+  setStat(should_status);
+  
+  i2c_callback();
+  
+  delay(10);
+  
+  if ((int)pingArduino() != 1) {
+    setStat(INIT);
+  }else if (ambient.readTempC() > 65) {
+    LOG("TEMPERATURE TOO HIGH");
+    setStat(INIT); 
+  }else {
+    delay(3000);
+  }
+  
+  switch (should_status) {
+    case INIT:
+      _init();
+      break;
+    case READY:
+      _ready();
+    default:
+      _default();
+      break;
   }
 }

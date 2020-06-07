@@ -4,3 +4,5 @@ misc/
 *.pyc
 *.swp
 *.swo
+/hardware/Watchdog/watcher.X/build/
+/hardware/Watchdog/watcher.X/dist/

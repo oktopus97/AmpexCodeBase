@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <EEPROM.h>
 #include "enums.h"
 #include "pyrometer.h"
 
@@ -11,7 +12,9 @@
 #define ESP8266 0
 #define ARDUINO 1
 
-_status currentStatus = INIT;
+_status currentStatus;
+//address on the eeprom for the status
+int status_address = 0x1;
 
 void clear_buffer(uint8_t * buff, int len) {
   uint8_t *ptr = buff;
@@ -38,12 +41,13 @@ void send_i2c(uint8_t * buff, int len) {
   clear_buffer(buff, len);
 };
 
+int last_comm;
 int recv_i2c(uint8_t * buff) {
+  last_comm = millis();
   uint8_t * ptr = (uint8_t*)buff;
   while(!Wire.available()){
     delay(100);
   }
-  uint8_t r;
   while (Wire.available()) {
     *ptr = Wire.read();
     ptr++;
@@ -62,20 +66,20 @@ void requested() {
     buffCurrentReadings((uint8_t*)_Buffer);
     send_i2c(_Buffer,  1 + sizeof(float) * NOSENSORS);
   } else {
-    Serial.println("req");
     send_i2c((uint8_t*)(_Buffer+COMMAND_SUB_BUFFER), available_bytes);
     available_bytes = 0;
   }
 };
 
-int last_ping;
+int interrupt_timer = 0;
+
 void received(int howMany) {
+  last_comm = millis();
   recv_i2c(_Buffer+COMMAND_SUB_BUFFER);
   //all command responses should be on the last 16  bytes of the buffer
   switch (*(_Buffer+COMMAND_SUB_BUFFER)){
     case _PING:
       digitalWrite(13, HIGH);
-      last_ping = millis();
       clear_buffer(_Buffer, howMany);
       *(_Buffer+COMMAND_SUB_BUFFER) =_PING;
       available_bytes++;
@@ -94,7 +98,9 @@ void received(int howMany) {
       break;
 
     case SETSTATUS:
+      if (interrupt_timer != 0) interrupt_timer = 0;
       currentStatus = (_status)*(_Buffer + COMMAND_SUB_BUFFER +1);
+      EEPROM.write(status_address, currentStatus);
       Serial.print("\nStatus is ");
       Serial.print(currentStatus);
       Serial.println();
@@ -136,23 +142,44 @@ Pyrometer pyro;
 //Motor motor;
 
 //sensor indexes are
-//  0 -> Pyrometer
-//  ...
+//  0 -> Pyrometer 
 bool fiber_in_cage = false;
 
-void procSpin() {
-  //spin cycle
-  return;
-}
-void procStop() {
-  //stop cycle
-  return;
-}
+void procLoop (_status curr) {
+  switch (curr)
+  {
+    case INIT:
+      Serial.println("INIT LOOP");
+      break;
+    case READY:
+      Serial.println("READY LOOP");
+      break;
+    case HEAT: 
+      Serial.println("HEAT LOOP");
+      break;
+    case SPIN:
+      Serial.println("SPIN LOOP");
+      break;
+    case COOL:
+      Serial.println("COOL LOOP");
+      break;
+    case INTERRUPT:
+      if (interrupt_timer == 0) {
+        interrupt_timer = millis();
+      }
+      Serial.println("INTERRUPTED");
+      if (interrupt_timer > 30000) currentStatus = READY;
+      break;
+   }
+};
+
 float getReading(int sensor_index) {
-  if (sensor_index == 0) {
-    return pyro.getReading();
+  switch (sensor_index) {
+    case 0:
+      return pyro.getReading();
+    default:
+      return 100.0;
   }
-  return 100.0;
 }
 void buffCurrentReadings(uint8_t * buff) {
   float reading;
@@ -171,28 +198,21 @@ void buffCurrentReadings(uint8_t * buff) {
 
 
 void setup() {
+  
   Serial.begin(9600);
   pinMode(LED_BUILTIN,OUTPUT);
   pinMode(A0, INPUT);
   Wire.begin(ARDUINO);
   Wire.onReceive(received);
   Wire.onRequest(requested);
-
+  currentStatus = (_status)EEPROM.read(status_address);
+  
 }
 
 
 
 void loop() {
-  if (millis() - last_ping > 10000 && (int)currentStatus > INIT) {
-    currentStatus = INIT;
-    GPIOWrite('d', 13, 0);
-    last_ping = millis();
-  }
+  if (millis() - last_comm> 10000) currentStatus = INIT;
   delay(1000);
-  switch (currentStatus) {
-    case SPINNING:
-      procSpin();
-    case FINISHED:
-      procStop();
-  }
+  procLoop(currentStatus);
 }

@@ -15,19 +15,21 @@ enum Commands:uint8_t{
   SET_IP,
   SET_BROKER,
   SET_WIFI,
-  SET_MODE,
   GPIOREAD,
   GPIOWRITE,
   PINGA,
-  PINGR
+  PINGR,
+  INVALID,
 };
 //------status------
 enum Status:uint8_t{
   INIT=1,
   READY,
-  SENSORERR,
-  SPINNING,
-  FINISHED,
+  HEAT,
+  SPIN,
+  COOL,
+  INTERRUPT
+
 };
 
 enum LogLevels:uint8_t {

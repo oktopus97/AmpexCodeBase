@@ -7,7 +7,8 @@ enum i2cCommands:uint8_t{
 enum _status:uint8_t{
   INIT =1,
   READY,
-  SENSORERR,
-  SPINNING,
-  FINISHED,
+  HEAT,
+  SPIN,
+  COOL,
+  INTERRUPT
 };
