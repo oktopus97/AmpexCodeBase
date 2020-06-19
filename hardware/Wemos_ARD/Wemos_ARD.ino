@@ -1,14 +1,28 @@
 #include <ESP8266WiFi.h>
 #include "config.h"
+#include <Adafruit_AMG88xx.h>
+#include <TimedAction.h>
 #include <Adafruit_MCP9808.h>
 
+int RESET_PIN = 0;
+int WATCHDOG = 2;
 
-int MQTT_LED = 2;
-int RESET_PIN = 16;
+void signalWatcher(){
+  digitalWrite(WATCHDOG, HIGH);
+  delay(200);
+  digitalWrite(WATCHDOG, LOW);
+}
 
 WiFiClient net;
 
+Status should_status;
+Status currentStatus;
 
+void aliveKeeper(){
+  signalWatcher();
+  setStat(should_status);
+}
+TimedAction thr = TimedAction(5000, aliveKeeper);
 
 //---------------------------i2c variables----------------------
 #define ESP8266                   0
@@ -21,8 +35,7 @@ WiFiClient net;
 
 uint8_t _Buffer[BUFFER_SIZE];
 
-Status should_status;
-Status currentStatus;
+
 
 //-----------i2c funcs---------------
 #include <Wire.h>
@@ -32,14 +45,15 @@ void reset_arduino() {
   LOG("RESETTING ARD", WARN);
   digitalWrite(RESET_PIN, HIGH);
   delay(200);
-  digitalWrite(RESET_PIN, HIGH);
+  digitalWrite(RESET_PIN, LOW);
 }
 void clear_buffer(uint8_t * buff, int len) {
   uint8_t *ptr = buff;
   for (ptr; (ptr - buff) < len; ptr++) *ptr = -1;
 };
-
+bool __test = 0;
 void send_i2c(uint8_t * buff, int len) {
+  if (__test) return;
   Wire.beginTransmission(ARDUINO);
   for (int i=0; i < len; i++) {
     Wire.write(*(buff + i));
@@ -52,6 +66,7 @@ void send_i2c(uint8_t * buff, int len) {
 };
 
 int recv_i2c(uint8_t * buff, int port, int howMany) {
+  if (__test) return 1;
   uint8_t * ptr = buff;
 
   if (howMany){
@@ -89,7 +104,9 @@ void dialogArduino(uint8_t * command,int len, int expected_bytes) {
   send_i2c((uint8_t *)&_Buffer[COMMAND_SUB_BUFFER], len);
   if (!recv_i2c((uint8_t*)&_Buffer[COMMAND_SUB_BUFFER], ARDUINO, expected_bytes)) setStat(INIT);
 }
+
 uint8_t pingArduino() {
+  if (__test) return 1;
   uint8_t command = (uint8_t)PING;
   dialogArduino(&command,1,1);
   uint8_t ret = (uint8_t)_Buffer[COMMAND_SUB_BUFFER];
@@ -129,6 +146,7 @@ bool connectMQTT(uint8_t tries) {
   LOG("connecting to mqtt server...");
   bool c = (bool)mqtt.connect("ESP", "try", "try");
   while (!c) {
+    thr.check();
     delay(500);
     tries--;
     c = (bool)mqtt.connect("ESP", "try", "try");
@@ -226,7 +244,7 @@ void saveStatus() {
   if (!SD.exists("/Status.txt")) {
      SD.mkdir("/Status.txt");
   }
-  File _s = SD.open("Status.txt");
+  File _s = SD.open("Status.txt", FILE_WRITE);
   _s.print('\b');
   _s.print(should_status);
 }
@@ -275,6 +293,7 @@ bool pingController(uint8_t tries) {
     }
   t = tries;
   while (true) {
+    thr.check();
   if (master == USB) {
       Serial.println('#');
       Serial.println(PINGR);
@@ -377,6 +396,13 @@ int checkSerial() {
 
   switch (command) {
     case SET_STAT:
+      if ((Status)((int)line[1]-48) != HEAT && (Status)((int)line[1]-48) != INTERRUPT) {
+        //the implementation might change
+        LOG("Only allowed to set the state to HEAT (start) and INTERRUPT(stop)");
+        break;
+      }
+      if (should_status == READY && (Status)((int)line[1]-48) == HEAT) 
+        LOG("STARTING NEW PROCESS");
       setStat((Status)((int)line[1]-48));
       break;
     case SET_IP:
@@ -513,6 +539,14 @@ void messageReceived(String &topic, String &pyld) {
   switch (first_byte) {
     case SET_STAT:
       payload++;
+      if ((Status)((int)*payload-48) != HEAT && (Status)((int)*payload-48) != INTERRUPT) {
+        //the implementation might change
+        LOG("Only allowed to set the state to HEAT (start) and INTERRUPT(stop)");
+        break;
+      }
+      if (should_status == READY && (Status)((int)*payload-48) == HEAT) 
+        LOG("STARTING NEW PROCESS");
+      
       setStat((uint8_t)*payload-48);
       break;
     case GPIOREAD:{
@@ -632,6 +666,7 @@ bool connectWiFi(int max_tries) {
   WiFi.begin(CONFIG_WIFI_SSID, CONFIG_WIFI_PASS);
   uint8_t tries = 0;
   while (WiFi.status() != WL_CONNECTED) {
+    thr.check();
     delay(1000);
     tries ++;
     if (tries > max_tries) {
@@ -670,7 +705,7 @@ bool connectController() {
   if (CONFIG_MODE==MQTT) {
     //connect to wifi
     LOG("Connecting WiFi");
-    if (WiFi.status() != WL_CONNECTED && !connectWiFi(50)) {
+    if (WiFi.status() != WL_CONNECTED && !connectWiFi(5)) {
       
       digitalWrite(BUILTIN_LED, LOW);
       LOG("WiFi Connection failed", WARN);
@@ -684,7 +719,7 @@ bool connectController() {
     }
   }
 
-  if (!pingController(10)){
+  if (!pingController(3)){
     return 0;
   } else return 1;
 }
@@ -704,6 +739,7 @@ void _default(){
     }
   }
 }
+
 
 void _init() {  
   if (!SD.begin(chip_select)) {
@@ -728,17 +764,42 @@ void _ready() {
   }
 }
 
+Adafruit_AMG88xx amg;
+float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
+void _heat() {
+  bool fiber = 0;
+  int i, j;
+  amg.begin();
+  delay(500);
+  while (!fiber) {
+    amg.readPixels(pixels);
+    j = 0;
+    for (i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+    
+      if (pixels[i] < 0) { //the frame is considered false
+        break;
+      }else if (pixels[i] > 80) j++; //to prevent false positives ...
+    }
+    if (j > 8) { //... require 8 pixels to be triggered
+      fiber = 1; 
+    }
+  }
+  setStat(HEAT);
+}
 
 
 void setup() {
+  thr.enable();
   Serial.begin(9600);
   ambient.begin();
+  aliveKeeper();
   
   //TODO SET LEDs
   pinMode(BUILTIN_LED, OUTPUT);
 
   //TODO reset mechanism
   pinMode(RESET_PIN, OUTPUT);
+  pinMode(WATCHDOG, OUTPUT);
 
   Wire.begin();
   
@@ -749,12 +810,11 @@ void setup() {
   setStatusfromSD();
     
 }
+
 void loop() {
+  thr.check();
   mqtt.loop();
   checkSerial();
-
-  setStat(should_status);
-  
   i2c_callback();
   
   delay(10);

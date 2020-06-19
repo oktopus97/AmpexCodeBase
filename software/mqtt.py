@@ -14,6 +14,7 @@ class MQTTClient(mqtt.Client):
 
         self.status = kwargs.pop("status_var")
         self.status_prop = kwargs.pop("status_prop")
+        self.ready = kwargs.pop("ready")
         super().__init__(**kwargs)
         self.connected = False
         self.serv = False
@@ -61,6 +62,7 @@ class MQTTClient(mqtt.Client):
                 self.connected = True
                 self.status.set(self.status.get() + " IBlock Connected")
                 self.status_prop = True
+                self.ready()
             if message.payload == b'IBLOCK DISCONNECT':
                 self.connected = False
                 self.status.set(self.status.get() + " IBlock Disconnected")

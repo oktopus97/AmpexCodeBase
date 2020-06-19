@@ -14,8 +14,9 @@ class SerialException(serial.serialutil.SerialException):
 class Serializer():
     pinged = False
 
-    def __init__(self, serial_port, var, prop, after):
+    def __init__(self, serial_port, var, prop, after, ready):
         self.port = serial_port
+        self.serial = None
 
         self.connected = False
 
@@ -34,6 +35,8 @@ class Serializer():
         self.status = var
         self.prop = prop
 
+        self.ready = ready
+
         self.connection_ev = threading.Event()
         self.waiting_loop = None
 
@@ -49,6 +52,7 @@ class Serializer():
                 continue
             try:
                 self.start_loop()
+                self.prop = True
                 self.connection_ev.set()
                 break
             except serial.serialutil.SerialException as e:
@@ -63,18 +67,18 @@ class Serializer():
 
     def init_serial(self):
         if self.waiting_loop is None:
+            self.connection_ev.clear()
             self.waiting_loop = threading.Thread(target=self.wait_for_usb)
             self.waiting_loop.daemon = True
             self.waiting_loop.start()
         if self.connection_ev.is_set():
-            self.waiting_thread.join()
-            self.waiting_thread = None
+            self.waiting_loop.join()
+            self.waiting_loop = None
+            self.ready(force="usb")
+            self.status.set("Connected with USB")
         else:
             self.after(1000, self.init_serial)
-        self.status.set("USB Connection initialized")
-        if self.ping_machine() == 1:
-            self.status.set("Connected with USB")
-            self.prop = True
+
         atexit.register(self.stop_loop)
 
     def writeline(self, string):
@@ -171,6 +175,7 @@ class Serializer():
 
     def send_command(self, command, *args):
         if not self.prop:
+            print("not prop")
             return False
         event = threading.Event()
         self._dialog_q.put((command, event, args))
@@ -243,7 +248,10 @@ class Serializer():
         self.stopper.set()
         self.connected = False
         time.sleep(1)
-        self.serial.close()
+        try:
+            self.serial.close()
+        except AttributeError:
+            pass
         with self._dialog_q.mutex:
             self._dialog_q.queue.clear()
         with self._answers_q.mutex:

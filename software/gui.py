@@ -55,14 +55,16 @@ class MainWindow(Tk):
 
         self.mqtt_client = mqtt.MQTTClient(client_id=('Ampex GUI @'+ self.ip),
                                            status_var=self.wifi_status,
-                                           status_prop=self.mqtt_status)
+                                           status_prop=self.mqtt_status,
+                                           ready=self.ready)
 
         self._serial_status = False
 
         self.serializer = usb_serial.Serializer(self.config["DEFAULTS"]["CONFIG_SERIAL_PORT"],
                                                 var=self.usb_status,
                                                 prop=self.serial_status,
-                                                after=lambda delay, callback: self.after(delay, callback))
+                                                after=lambda delay, callback: self.after(delay, callback),
+                                                ready=self.ready)
 
         self.toolbar.grid(row=0, column=0, sticky='nsew')
 
@@ -120,31 +122,31 @@ class MainWindow(Tk):
         frame = self.frames[page_name]
         frame.tkraise()
 
-    def get_clt(self):
-        if self.serial_status:
+    def get_clt(self, **kwargs):
+        if self.serial_status or kwargs.get("force", None) == "usb":
             return self.serializer
-        elif self.mqtt_status:
+        elif self.mqtt_status or kwargs.get("force", None) == "mqtt":
             return self.mqtt_client
         else:
             raise common.ControllerException('No Connection')
 
-    def ready(self):
+    def ready(self, **kwargs):
         if self.initiated is False:
             self.initiated = True
-        clt = self.get_clt()
+        clt = self.get_clt(force=kwargs.get("force", None))
         clt.set_status(common.should_status)
 
         common.ready = True
         self.start_button["state"] = "normal"
+        self.frames["PlotsFrame"].start_plotting()
 
     def start(self):
         clt = self.get_clt()
-        common.should_status = MachineStatus.SPIN
+        common.should_status = MachineStatus.HEAT
         clt.set_status(common.should_status)
         self.start_button["state"] = "disabled"
         self.stop_button["state"] = "normal"
         time.sleep(3)
-        self.frames["PlotsFrame"].start_plotting()
 
     def stop(self):
         clt = self.get_clt()
@@ -152,7 +154,6 @@ class MainWindow(Tk):
         clt.set_status(common.should_status)
         self.stop_button["state"] = "disabled"
         self.start_button["state"] = "normal"
-        self.frames["PlotsFrame"].stop_plotting()
 
 class PlotsFrame(Frame):
     def __init__(self, master, controller):

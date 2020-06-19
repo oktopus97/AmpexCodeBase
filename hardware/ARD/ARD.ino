@@ -159,6 +159,7 @@ void procLoop (_status curr) {
       break;
     case SPIN:
       Serial.println("SPIN LOOP");
+      
       break;
     case COOL:
       Serial.println("COOL LOOP");
@@ -212,7 +213,7 @@ void setup() {
 
 
 void loop() {
-  if (millis() - last_comm> 10000) currentStatus = INIT;
+  if (millis() - last_comm> 15000) currentStatus = INIT;
   delay(1000);
   procLoop(currentStatus);
 }
