@@ -2,6 +2,7 @@
 #include <EEPROM.h>
 #include "enums.h"
 #include "pyrometer.h"
+#include "motor.h"
 
 #define NOSENSORS 4
 #define BUFFER_SIZE 64
@@ -138,8 +139,13 @@ void GPIOWrite(char mod, uint8_t pin, uint8_t val){
 
 //hardware code -->
 Pyrometer pyro;
-// TODO Motor code
-//Motor motor;
+
+#define START_PIN 50
+#define SPEED_PIN 52
+#define ACCEL_PIN 51
+#define READY_PIN 53
+
+MotorDriver motor(START_PIN, SPEED_PIN, ACCEL_PIN, READY_PIN, 0xA2);
 
 //sensor indexes are
 //  0 -> Pyrometer 
@@ -150,18 +156,22 @@ void procLoop (_status curr) {
   {
     case INIT:
       Serial.println("INIT LOOP");
+      motor.stopSpin();
       break;
     case READY:
       Serial.println("READY LOOP");
+      motor.stopSpin();
       break;
     case HEAT: 
       Serial.println("HEAT LOOP");
+      motor.stopSpin();
       break;
     case SPIN:
       Serial.println("SPIN LOOP");
-      
+      motor.startSpin();
       break;
     case COOL:
+      motor.stopSpin();
       Serial.println("COOL LOOP");
       break;
     case INTERRUPT:
@@ -206,8 +216,8 @@ void setup() {
   Wire.begin(ARDUINO);
   Wire.onReceive(received);
   Wire.onRequest(requested);
-  currentStatus = (_status)EEPROM.read(status_address);
-  
+  currentStatus = (_status)EEPROM.read(status_address); 
+  if ((int)currentStatus == 0) currentStatus=(_status)1;
 }
 
 

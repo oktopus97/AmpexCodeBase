@@ -24,6 +24,33 @@ void aliveKeeper(){
 }
 TimedAction thr = TimedAction(5000, aliveKeeper);
 
+
+Adafruit_AMG88xx amg;
+float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
+
+int detectFiber(int threshold, int pixel_ct) {
+  bool fiber = 0;
+  int i, j;
+  amg.begin();
+  delay(500);
+  while (!fiber) {
+    aliveKeeper();
+    amg.readPixels(pixels);
+    j = 0;
+    for (i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      LOG(String(pixels[i]).c_str());
+    
+      if (pixels[i] < 0) { //the frame is considered false
+        break;
+      }else if (pixels[i] > threshold) j++; //to prevent false positives ...
+    }
+    if (j > pixel_ct) { //... require 8 pixels to be triggered
+      fiber = 1; 
+    }
+  }  
+  return 1;
+}
+
 //---------------------------i2c variables----------------------
 #define ESP8266                   0
 #define ARDUINO                   1
@@ -128,6 +155,8 @@ uint8_t arduinoLight(bool _on) {
   *(command + 3) = (uint8_t)_on;
   dialogArduino(command, 4,1);
   uint8_t ret = _Buffer[0];
+
+  free(command);
 
   clear_buffer((uint8_t*)&_Buffer, 1);
   return ret;
@@ -237,6 +266,7 @@ Status getStatusfromSD(){
 
 void setStatusfromSD() {
   should_status = getStatusfromSD();
+  if ((int)should_status==0) should_status = (Status)1;
   setStat(should_status);
 }
 
@@ -363,6 +393,7 @@ void setIpAddressfromString(IPAddress * global_ip, const char * line) {
     memset(p, 0, 4);
     len = 0;
   }
+  free(initial_ptr);
 }
 
 String getLine(){
@@ -379,7 +410,10 @@ String getLine(){
 }
 
 int checkSerial() {
+  Serial.println("DTR");
+  delay(1000);
   if (!Serial.available()) return 0;
+  else LOG(getLine().c_str()); //read the dtr 0
   String line = getLine();
   if (line[0] == '#'){
     do {
@@ -395,6 +429,10 @@ int checkSerial() {
   delay(20);
 
   switch (command) {
+    case (uint8_t)'d' - 48:
+      LOG("Drop detection test");
+      detectFiber(50, 1);
+      break;     
     case SET_STAT:
       if ((Status)((int)line[1]-48) != HEAT && (Status)((int)line[1]-48) != INTERRUPT) {
         //the implementation might change
@@ -491,6 +529,7 @@ uint8_t setStat(uint8_t stat) {
   * (command + 2) = '\0';
   dialogArduino(command,2,1);
   
+  
   Status ret = (Status)_Buffer[COMMAND_SUB_BUFFER];
   
   while (ret != stat) {
@@ -503,6 +542,7 @@ uint8_t setStat(uint8_t stat) {
   saveStatus();
   if (should_status != currentStatus) return -1;
   clear_buffer((uint8_t*)&_Buffer, 1);
+  free(command);
   return currentStatus;
 }
 
@@ -562,12 +602,14 @@ void messageReceived(String &topic, String &pyld) {
         return;
       }
       dialogArduino(command, 4,1);
+      free(command);
       if (payload[1] == 'd')
         LOG(String(_Buffer[0]).c_str(),DATA);
       else{
         char * ptr = (char*)malloc(8);
         sprintf(ptr, "%f" ,(float*)&_Buffer);
         LOG(ptr, DATA);
+        free(ptr);
       }
       clear_buffer((uint8_t*)&_Buffer, 1);
       break;
@@ -584,6 +626,7 @@ void messageReceived(String &topic, String &pyld) {
         return;
       }
       dialogArduino(command, 4,1);
+      free(command);
       LOG(String(_Buffer[0]).c_str(), DATA);
       clear_buffer((uint8_t*)&_Buffer, 1);
       break;
@@ -647,7 +690,7 @@ void i2c_callback() {
   }
   sprintf((char*)ptr, "%03.6f", readings[NOSENSORS-1]);
   LOG(post,DATA);
-
+  free((void*)post);
 
 }
 
@@ -671,7 +714,6 @@ bool connectWiFi(int max_tries) {
     tries ++;
     if (tries > max_tries) {
 	    LOG("WIFI CONNECTION FAILED", 2);
-	    LOG("ERR 2: MAX TRIES", 2);
 	    return false;
     }
   }
@@ -730,7 +772,6 @@ bool connectController() {
 //as the communications stay the same
 void _default(){
   if (!pingController(5)){
-    LOG("Controller Not Found", WARN);
     if (!connectController()) {
       LOG("Setting READY status", WARN);
       should_status=READY;
@@ -764,27 +805,9 @@ void _ready() {
   }
 }
 
-Adafruit_AMG88xx amg;
-float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
 void _heat() {
-  bool fiber = 0;
-  int i, j;
-  amg.begin();
-  delay(500);
-  while (!fiber) {
-    amg.readPixels(pixels);
-    j = 0;
-    for (i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
-    
-      if (pixels[i] < 0) { //the frame is considered false
-        break;
-      }else if (pixels[i] > 80) j++; //to prevent false positives ...
-    }
-    if (j > 8) { //... require 8 pixels to be triggered
-      fiber = 1; 
-    }
-  }
-  setStat(HEAT);
+  detectFiber(80, 8);
+  setStat(SPIN);
 }
 
 
@@ -793,7 +816,6 @@ void setup() {
   Serial.begin(9600);
   ambient.begin();
   aliveKeeper();
-  
   //TODO SET LEDs
   pinMode(BUILTIN_LED, OUTPUT);
 

@@ -48,6 +48,11 @@ class MainWindow(Tk):
         self.stop_button.grid(row=0, column=4)
         self.stop_button['state'] = 'disabled'
 
+        self.droptest_button = Button(self.toolbar, text='Drop Test', command=self.droptest)
+        self.droptest_button.grid(row=0, column=5)
+        self.droptest_res = StringVar()
+        Label(self.toolbar, textvariable=self.droptest_res)
+        
         self.config_button = Button(self.toolbar, text='Configure', command=lambda : controller.show_frame("ConfigFrame"))
         self.config_button.grid(row=0, column=0)
 
@@ -87,7 +92,10 @@ class MainWindow(Tk):
         self.show_frame("PlotsFrame")
         common.set_sensor_vars(self.sensor_vars)
         common.status_var = self.machine_status
-
+    
+    def droptest(self):
+        if self.serializer.droptest():
+            self.droptest_res.set("Drop Detected")
     @property
     def mqtt_status(self):
         return self._mqtt_status
@@ -130,11 +138,14 @@ class MainWindow(Tk):
         else:
             raise common.ControllerException('No Connection')
 
-    def ready(self, **kwargs):
+    def ready(self, connection, **kwargs):
         if self.initiated is False:
             self.initiated = True
-        clt = self.get_clt(force=kwargs.get("force", None))
-        clt.set_status(common.should_status)
+        if connection == "mqtt":
+            self.mqtt_status = True
+        elif connection == "usb":
+            self.get_clt(force="usb").ping_machine()
+            self.serial_status = True
 
         common.ready = True
         self.start_button["state"] = "normal"

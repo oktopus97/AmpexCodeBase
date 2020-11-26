@@ -22,16 +22,18 @@ class MQTTClient(mqtt.Client):
 
 
     def connect_to_serv(self):
-
+        if self.connected:
+            return
         self.will_set("/ServerStatus", payload="Offline", qos=0, retain=True)
         self.connect(self.config["DEFAULTS"]["config_broker_ip"], int(self.config["DEFAULTS"]["config_broker_port"]))
         self.loop_start()
         ip_addr = self.config["DEFAULTS"]["config_broker_ip"]
         self.status.set("Local Server running" if self.serv else
                         "Conected to server @{}".format(ip_addr))
+        self.connected = True
     def init_server(self):
         if bool(self.config["DEFAULTS"]["CONFIG_LOCAL_SERVER"]):
-            print("Starting Local Server")
+            prit("Starting Local Server")
             self.server = subprocess.Popen(['mosquitto', "-p",
                     str(self.config["DEFAULTS"]["config_broker_port"])])
             time.sleep(1)
@@ -45,7 +47,7 @@ class MQTTClient(mqtt.Client):
             subprocess.check_output(["pkill", "mosquitto"])
 
     def on_disconnect(self, *args, **kwargs):
-        self.ready = False
+        self.connected = False
 
     def on_connect(self, client, userdata, flags, rc):
         self.publish("/ServerStatus", payload="Online", qos=0, retain=True)
@@ -62,7 +64,7 @@ class MQTTClient(mqtt.Client):
                 self.connected = True
                 self.status.set(self.status.get() + " IBlock Connected")
                 self.status_prop = True
-                self.ready()
+                self.ready("mqtt")
             if message.payload == b'IBLOCK DISCONNECT':
                 self.connected = False
                 self.status.set(self.status.get() + " IBlock Disconnected")

@@ -42,13 +42,20 @@ class Serializer():
 
         self.config = configparser.ConfigParser()
         self.config.read("conf.ini")
+        
+        self.dtr = threading.Event()
 
         self.after = after
         self.init_serial()
 
+    def droptest(self):
+        self.send_command("d")
+        return True
+
     def wait_for_usb(self):
         while True:
             if not os.path.exists(self.config["DEFAULTS"]["CONFIG_SERIAL_PORT"]):
+                self.status.set("USB Cable not connected")
                 continue
             try:
                 self.start_loop()
@@ -74,8 +81,8 @@ class Serializer():
         if self.connection_ev.is_set():
             self.waiting_loop.join()
             self.waiting_loop = None
-            self.ready(force="usb")
-            self.status.set("Connected with USB")
+            self.ready("usb")
+            self.status.set("Machine Detected")
         else:
             self.after(1000, self.init_serial)
 
@@ -96,7 +103,6 @@ class Serializer():
         def _write(m):
             self._recv_event.clear()
             self.writeline(str(m))
-            print(f"writing in dialog {m}")
             tries = 30
             while True:
                 tries -= 1
@@ -146,6 +152,9 @@ class Serializer():
 
 
         #func starts here->
+        while self.dtr.is_set() is False:
+            print("dtr set")
+            time.delay(0.1)
         print(f"ask -> {msg}")
         print(f"args -> {args}")
 
@@ -161,6 +170,7 @@ class Serializer():
             time.sleep(0.2)
 
             event.set()
+            self.dtr.clear()
 
             return check_response("OK")
         else:
@@ -171,6 +181,7 @@ class Serializer():
                     print(check_response("?"))
                 else:
                     event.set()
+                    self.dtr.clear()
                     return check_response("OK")
 
     def send_command(self, command, *args):
@@ -229,6 +240,7 @@ class Serializer():
 
     def start_loop(self):
         self.serial = serial.Serial(self.port)
+        print("Serial object initialized")
         while True:
             if self.serial.in_waiting:
                 self.serial.read()
@@ -268,14 +280,20 @@ class Serializer():
 
 
     def dialog_thread(self, ev):
-
         while True:
             if ev.is_set():
                 return
-            job, event, args = self._dialog_q.get()
-            ans = self.dialog(job, event, *args)
-            self._answers_q.put(ans)
-            time.sleep(1)
+            if self.dtr.is_set() is False:
+                continue
+
+            try:
+                job, event, args = self._dialog_q.get(0)
+                self.serial.write(b"0\n")
+                ans = self.dialog(job, event, *args)
+                self._answers_q.put(ans)
+                time.sleep(1)
+            except queue.Empty:
+                continue
 
     def reader_thread(self, ev, recv):
         dialog = False
@@ -306,8 +324,12 @@ class Serializer():
                 self.ping_machine()
                 self.set_status(common.should_status)
                 continue
+            if line[:3] == b"DTR":
+                self.serial.flush()
+                self.dtr.set()
+                continue
 
-            if line[0] ==91:#[
+            if line[0] == 91:#[
                 common.log(line)
                 continue
 
